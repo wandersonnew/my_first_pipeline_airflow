@@ -7,7 +7,8 @@ os.makedirs("database", exist_ok=True)
 
 conn = sqlite3.connect("database/combustiveis.db")
 
-billing_id = "analise-de-dados-492901"
+# id de um projeto no GCP
+billing_id = "idaqui"
 
 query = """
   SELECT
