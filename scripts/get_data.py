@@ -2,42 +2,51 @@ import pandas as pd
 import basedosdados as bd
 import sqlite3
 import os
+from datetime import datetime, timedelta
+
+YEARSTART = 2021
+DATESTART = "2021-01-01"
 
 os.makedirs("database", exist_ok=True)
 
 conn = sqlite3.connect("database/combustiveis.db")
 
-# id de um projeto no GCP
-billing_id = "idaqui"
+# your GCP id here
+billing_id = "gcp_id"
 
-query = """
-  SELECT
-    dados.ano as ano,
-    dados.sigla_uf AS sigla_uf,
-    diretorio_sigla_uf.nome AS sigla_uf_nome,
-    dados.id_municipio AS id_municipio,
-    diretorio_id_municipio.nome AS id_municipio_nome,
-    dados.bairro_revenda as bairro_revenda,
-    dados.cep_revenda as cep_revenda,
-    dados.endereco_revenda as endereco_revenda,
-    dados.cnpj_revenda as cnpj_revenda,
-    dados.nome_estabelecimento as nome_estabelecimento,
-    dados.bandeira_revenda as bandeira_revenda,
-    dados.data_coleta as data_coleta,
-    dados.produto as produto,
-    dados.unidade_medida as unidade_medida,
-    dados.preco_compra as preco_compra,
-    dados.preco_venda as preco_venda
-FROM `basedosdados.br_anp_precos_combustiveis.microdados` AS dados
-LEFT JOIN (SELECT DISTINCT sigla,nome  FROM `basedosdados.br_bd_diretorios_brasil.uf`) AS diretorio_sigla_uf
-    ON dados.sigla_uf = diretorio_sigla_uf.sigla
-LEFT JOIN (SELECT DISTINCT id_municipio,nome  FROM `basedosdados.br_bd_diretorios_brasil.municipio`) AS diretorio_id_municipio
-    ON dados.id_municipio = diretorio_id_municipio.id_municipio
-WHERE dados.ano = 2026
-AND EXTRACT(MONTH FROM dados.data_coleta) = 3
-"""
+# FUNCTIONS
+def criar_tabela_datas(conn):
+    query = """
+        CREATE TABLE IF NOT EXISTS datas_consultas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ano INTEGER,
+            data TEXT,
+            UNIQUE(ano, data)
+        )
+    """
+    conn.execute(query)
+    conn.commit()
 
-df = bd.read_sql(query = query, billing_project_id = billing_id)
+def filtros():
+    criar_tabela_datas(conn)
+    
+    query_filtro = """
+        SELECT MAX(ano) as ano, MAX(data) as data
+        FROM datas_consultas
+    """
+
+    filtro_data = pd.read_sql(query_filtro, conn)
+
+    if filtro_data.empty:
+        return (YEARSTART, DATESTART)
+
+    ano = filtro_data.iloc[0]["ano"]
+    data = filtro_data.iloc[0]["data"]
+
+    if pd.isna(ano) or pd.isna(data):
+        return (YEARSTART, DATESTART)
+
+    return (int(ano), data)
 
 def marge_por_produto(produtos):
     margens = {}
@@ -69,6 +78,39 @@ def calcula_lucro(compra, venda, produto, margens):
     
     return 0
 
+filtro_ano ,filtro_data = filtros()
+
+# EXTRACT
+query = f"""
+        SELECT
+            dados.ano as ano,
+            dados.sigla_uf AS sigla_uf,
+            diretorio_sigla_uf.nome AS sigla_uf_nome,
+            dados.id_municipio AS id_municipio,
+            diretorio_id_municipio.nome AS id_municipio_nome,
+            dados.bairro_revenda as bairro_revenda,
+            dados.cep_revenda as cep_revenda,
+            dados.endereco_revenda as endereco_revenda,
+            dados.cnpj_revenda as cnpj_revenda,
+            dados.nome_estabelecimento as nome_estabelecimento,
+            dados.bandeira_revenda as bandeira_revenda,
+            dados.data_coleta as data_coleta,
+            dados.produto as produto,
+            dados.unidade_medida as unidade_medida,
+            dados.preco_compra as preco_compra,
+            dados.preco_venda as preco_venda
+        FROM `basedosdados.br_anp_precos_combustiveis.microdados` AS dados
+        LEFT JOIN (SELECT DISTINCT sigla,nome  FROM `basedosdados.br_bd_diretorios_brasil.uf`) AS diretorio_sigla_uf
+            ON dados.sigla_uf = diretorio_sigla_uf.sigla
+        LEFT JOIN (SELECT DISTINCT id_municipio,nome  FROM `basedosdados.br_bd_diretorios_brasil.municipio`) AS diretorio_id_municipio
+            ON dados.id_municipio = diretorio_id_municipio.id_municipio
+        WHERE dados.ano = {filtro_ano}
+        AND dados.data_coleta = DATE('{filtro_data}')
+    """
+
+df = bd.read_sql(query = query, billing_project_id = billing_id)
+
+# TRANSFORM
 margens = marge_por_produto(df["produto"].unique())
 
 df["lucro"] = df.apply(
@@ -86,4 +128,16 @@ df["id"] = pd.util.hash_pandas_object(
     index=False
 ).astype(str)
 
-df.to_sql("precos_combustiveis", conn, if_exists="append", index=False)
+
+# LOAD
+if df.shape[0] > 0:
+    df.to_sql("precos_combustiveis", conn, if_exists="append", index=False)
+
+query = """
+        INSERT INTO datas_consultas (ano, data)
+        VALUES (?, ?)
+        ON CONFLICT(ano, data) DO NOTHING
+    """
+
+conn.execute(query, (filtro_ano, filtro_data))
+conn.commit()
